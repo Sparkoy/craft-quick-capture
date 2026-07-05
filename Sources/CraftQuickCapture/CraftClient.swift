@@ -6,6 +6,26 @@ struct CraftDocument: Codable, Identifiable, Hashable {
     var folder: String?
 }
 
+struct CraftCollection: Codable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let documentId: String  // rootBlockId of the containing document
+}
+
+struct CraftColumn: Codable, Hashable {
+    let key: String         // internal key used in --items JSON (lowercase)
+    let display: String     // display name shown in Craft
+    let type: String        // text, url, number, singleSelect, …
+    let isTitle: Bool       // the item-name column; top-level key, not a property
+    let options: [String]   // non-empty for select types
+}
+
+struct CraftSchema: Codable, Hashable {
+    let collectionId: String
+    let columns: [CraftColumn]
+    var titleKey: String { columns.first(where: \.isTitle)?.key ?? "title" }
+}
+
 enum CraftError: LocalizedError {
     case http(Int)
     case tool(String)
@@ -142,6 +162,78 @@ struct CraftClient {
         let quoted = Self.craftQuote(markdown)
         _ = try await call(tool: "craft_write",
                            command: "blocks add --id \(pageId) --markdown \(quoted) --position end")
+    }
+
+    /// Parses `collections list`: lines like
+    ///   Name <id> - N items (in document <docId>)
+    func listCollections() async throws -> [CraftCollection] {
+        let text = try await call(tool: "craft_read", command: "collections list")
+        let regex = try NSRegularExpression(
+            pattern: #"^\s*(.+?)\s+<([0-9A-Fa-f-]+)>\s+-\s+\d+ items? \(in document ([0-9A-Fa-f-]+)\)"#)
+        var result: [CraftCollection] = []
+        for line in text.split(separator: "\n") {
+            let s = String(line)
+            let range = NSRange(s.startIndex..., in: s)
+            guard let m = regex.firstMatch(in: s, range: range),
+                  let nameR = Range(m.range(at: 1), in: s),
+                  let idR = Range(m.range(at: 2), in: s),
+                  let docR = Range(m.range(at: 3), in: s) else { continue }
+            result.append(CraftCollection(id: String(s[idR]),
+                                          name: String(s[nameR]),
+                                          documentId: String(s[docR])))
+        }
+        return result
+    }
+
+    /// Parses `collections schema`: column lines like
+    ///   key → "Display" (type, item name / row headline…) — options: A (color), B (color)
+    func collectionSchema(id: String) async throws -> CraftSchema {
+        let text = try await call(tool: "craft_read", command: "collections schema --collection \(id)")
+        let colRegex = try NSRegularExpression(
+            pattern: #"^\s+(\S+) → "(.+?)" \(([^)]*)\)(?:\s+—\s+options:\s+(.+))?$"#)
+        var columns: [CraftColumn] = []
+        for line in text.split(separator: "\n") {
+            let s = String(line)
+            let range = NSRange(s.startIndex..., in: s)
+            guard let m = colRegex.firstMatch(in: s, range: range),
+                  let keyR = Range(m.range(at: 1), in: s),
+                  let dispR = Range(m.range(at: 2), in: s),
+                  let typeR = Range(m.range(at: 3), in: s) else { continue }
+            let typeInfo = String(s[typeR])
+            let type = typeInfo.components(separatedBy: ",")[0].trimmingCharacters(in: .whitespaces)
+            var options: [String] = []
+            if let optR = Range(m.range(at: 4), in: s) {
+                // "Todo (yellow), Doing (lime)" → strip the trailing color parens
+                options = String(s[optR]).components(separatedBy: ", ").map {
+                    $0.replacingOccurrences(of: #" \([^)]*\)$"#, with: "", options: .regularExpression)
+                }
+            }
+            columns.append(CraftColumn(key: String(s[keyR]),
+                                       display: String(s[dispR]),
+                                       type: type,
+                                       isTitle: typeInfo.contains("item name"),
+                                       options: options))
+        }
+        guard !columns.isEmpty else { throw CraftError.badResponse }
+        return CraftSchema(collectionId: id, columns: columns)
+    }
+
+    /// Adds one row. `values` is keyed by column key; the title column goes
+    /// top-level, everything else under "properties". Empty values are omitted.
+    func addCollectionItem(schema: CraftSchema, values: [String: String]) async throws {
+        var item: [String: Any] = [:]
+        var properties: [String: String] = [:]
+        for col in schema.columns {
+            guard let v = values[col.key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !v.isEmpty else { continue }
+            if col.isTitle { item[col.key] = v } else { properties[col.key] = v }
+        }
+        if item[schema.titleKey] == nil { item[schema.titleKey] = "Untitled" }
+        if !properties.isEmpty { item["properties"] = properties }
+        let json = try JSONSerialization.data(withJSONObject: [item])
+        let itemsArg = String(decoding: json, as: UTF8.self)
+        _ = try await call(tool: "craft_write",
+                           command: "collections items-add --collection \(schema.collectionId) --items \(itemsArg)")
     }
 
     static func craftQuote(_ s: String) -> String {

@@ -1,23 +1,53 @@
 import Foundation
 
-/// Caches the space's document list on disk so the picker is instant, and
-/// tracks recently used destinations. Refreshes in the background.
+/// A capture destination: a document page (append blocks) or a
+/// collection/table (add a row).
+enum Destination: Codable, Hashable, Identifiable {
+    case document(CraftDocument)
+    case collection(CraftCollection)
+
+    var id: String {
+        switch self {
+        case .document(let d): return d.id
+        case .collection(let c): return c.id
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .document(let d): return d.title
+        case .collection(let c): return c.name
+        }
+    }
+
+    var isCollection: Bool {
+        if case .collection = self { return true }
+        return false
+    }
+}
+
+/// Caches the space's documents and collections on disk so the picker is
+/// instant, and tracks recently used destinations. Refreshes in the background.
 @MainActor
 final class DocumentStore: ObservableObject {
     @Published var documents: [CraftDocument] = []
+    @Published var collections: [CraftCollection] = []
     @Published var recentIds: [String] = []
     @Published var lastUsedId: String?
     @Published var isRefreshing = false
 
     private let client = CraftClient()
     private var lastFetch: Date?
+    private var schemaCache: [String: CraftSchema] = [:]
 
     private var cacheFile: URL { Config.supportDir.appendingPathComponent("documents.json") }
     private var recentsFile: URL { Config.supportDir.appendingPathComponent("recents.json") }
+    private var schemasFile: URL { Config.supportDir.appendingPathComponent("schemas.json") }
 
     private struct Cache: Codable {
         var fetchedAt: Date
         var docs: [CraftDocument]
+        var collections: [CraftCollection]?
     }
     private struct Recents: Codable {
         var ids: [String]
@@ -28,12 +58,17 @@ final class DocumentStore: ObservableObject {
         if let data = try? Data(contentsOf: cacheFile),
            let cache = try? JSONDecoder().decode(Cache.self, from: data) {
             documents = cache.docs
+            collections = cache.collections ?? []
             lastFetch = cache.fetchedAt
         }
         if let data = try? Data(contentsOf: recentsFile),
            let recents = try? JSONDecoder().decode(Recents.self, from: data) {
             recentIds = recents.ids
             lastUsedId = recents.lastUsed
+        }
+        if let data = try? Data(contentsOf: schemasFile),
+           let schemas = try? JSONDecoder().decode([String: CraftSchema].self, from: data) {
+            schemaCache = schemas
         }
         refreshIfStale()
     }
@@ -54,56 +89,101 @@ final class DocumentStore: ObservableObject {
             do {
                 let docs = try await client.listAllDocuments()
                 guard !docs.isEmpty else { return }
+                let cols = (try? await client.listCollections()) ?? collections
                 documents = docs
+                collections = cols
                 lastFetch = Date()
-                let cache = Cache(fetchedAt: Date(), docs: docs)
+                let cache = Cache(fetchedAt: Date(), docs: docs, collections: cols)
                 if let data = try? JSONEncoder().encode(cache) {
                     try? data.write(to: cacheFile)
                 }
             } catch {
-                NSLog("CraftQuickCapture: document refresh failed: \(error.localizedDescription)")
+                NSLog("CraftQuickCapture: refresh failed: \(error.localizedDescription)")
             }
         }
     }
 
-    func markUsed(_ doc: CraftDocument) {
-        recentIds.removeAll { $0 == doc.id }
-        recentIds.insert(doc.id, at: 0)
+    /// Cached schema immediately if available; fetches (and re-caches) otherwise.
+    func schema(for collection: CraftCollection) async throws -> CraftSchema {
+        if let cached = schemaCache[collection.id] {
+            // Refresh in the background so new columns appear next time.
+            Task { [weak self] in
+                if let fresh = try? await self?.client.collectionSchema(id: collection.id) {
+                    self?.storeSchema(fresh)
+                }
+            }
+            return cached
+        }
+        let fresh = try await client.collectionSchema(id: collection.id)
+        storeSchema(fresh)
+        return fresh
+    }
+
+    private func storeSchema(_ schema: CraftSchema) {
+        schemaCache[schema.collectionId] = schema
+        if let data = try? JSONEncoder().encode(schemaCache) {
+            try? data.write(to: schemasFile)
+        }
+    }
+
+    /// Folder context for a destination: the document's folder, or for a
+    /// collection, the containing document's title.
+    func context(for dest: Destination) -> String? {
+        switch dest {
+        case .document(let d): return d.folder
+        case .collection(let c):
+            return documents.first { $0.id == c.documentId }?.title
+        }
+    }
+
+    func markUsed(_ dest: Destination) {
+        recentIds.removeAll { $0 == dest.id }
+        recentIds.insert(dest.id, at: 0)
         recentIds = Array(recentIds.prefix(8))
-        lastUsedId = doc.id
+        lastUsedId = dest.id
         let recents = Recents(ids: recentIds, lastUsed: lastUsedId)
         if let data = try? JSONEncoder().encode(recents) {
             try? data.write(to: recentsFile)
         }
     }
 
-    var recentDocuments: [CraftDocument] {
-        let byId = Dictionary(uniqueKeysWithValues: documents.map { ($0.id, $0) })
-        return recentIds.compactMap { byId[$0] }
+    private func destination(forId id: String) -> Destination? {
+        if let d = documents.first(where: { $0.id == id }) { return .document(d) }
+        if let c = collections.first(where: { $0.id == id }) { return .collection(c) }
+        return nil
     }
 
-    var lastUsedDocument: CraftDocument? {
+    var recentDestinations: [Destination] {
+        recentIds.compactMap { destination(forId: $0) }
+    }
+
+    var lastUsedDestination: Destination? {
         guard let lastUsedId else { return nil }
-        return documents.first { $0.id == lastUsedId }
+        return destination(forId: lastUsedId)
     }
 
-    /// Case-insensitive match. Every space-separated token must appear in the
-    /// title or folder name (so a folder word narrows same-named docs).
+    /// Case-insensitive match over documents AND collections. Every
+    /// space-separated token must appear in the title or context (folder /
+    /// containing doc), so a folder word narrows same-named docs.
     /// Ranking: title prefix beats title word-start beats any match.
-    func search(_ query: String, limit: Int = 6) -> [CraftDocument] {
+    func search(_ query: String, limit: Int = 6) -> [Destination] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return Array(recentDocuments.prefix(limit)) }
+        guard !q.isEmpty else { return Array(recentDestinations.prefix(limit)) }
         let tokens = q.split(separator: " ").map(String.init)
-        var scored: [(doc: CraftDocument, score: Int)] = []
-        for doc in documents {
-            let t = doc.title.lowercased()
-            let hay = t + " " + (doc.folder?.lowercased() ?? "")
-            guard tokens.allSatisfy({ hay.contains($0) }) else { continue }
-            if t.hasPrefix(q) { scored.append((doc, 0)) }
-            else if t.contains(" \(q)") { scored.append((doc, 1)) }
-            else { scored.append((doc, 2)) }
+        var scored: [(dest: Destination, score: Int)] = []
+
+        func consider(_ dest: Destination) {
+            let t = dest.title.lowercased()
+            let hay = t + " " + (context(for: dest)?.lowercased() ?? "")
+            guard tokens.allSatisfy({ hay.contains($0) }) else { return }
+            if t.hasPrefix(q) { scored.append((dest, 0)) }
+            else if t.contains(" \(q)") { scored.append((dest, 1)) }
+            else { scored.append((dest, 2)) }
         }
-        return scored.sorted { ($0.score, $0.doc.title) < ($1.score, $1.doc.title) }
-            .prefix(limit).map(\.doc)
+        for c in collections { consider(.collection(c)) }
+        for d in documents { consider(.document(d)) }
+
+        return scored.sorted { ($0.score, $0.dest.title) < ($1.score, $1.dest.title) }
+            .prefix(limit).map(\.dest)
     }
 }

@@ -15,14 +15,18 @@ struct CaptureView: View {
     @ObservedObject var model: CaptureModel
     @FocusState private var focus: Field?
 
-    enum Field { case editor, docSearch }
+    enum Field: Hashable { case editor, docSearch, column(String) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            editor
-            if let preview = model.imagePreview {
-                imageRow(preview)
+            if model.isTableCapture {
+                tableForm
+            } else {
+                editor
+                if let preview = model.imagePreview {
+                    imageRow(preview)
+                }
             }
             destination
             if let error = model.errorMessage {
@@ -44,23 +48,35 @@ struct CaptureView: View {
                 )
         )
         .onDrop(of: [.image, .fileURL], isTargeted: nil) { providers in
-            handleDrop(providers)
+            guard !model.isTableCapture else { return false }
+            return handleDrop(providers)
         }
         .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focus = .editor }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focusPrimary() }
         }
         .onChange(of: model.isPickingDoc) { picking in
-            focus = picking ? .docSearch : .editor
+            if picking { focus = .docSearch } else { focusPrimary() }
+        }
+        .onChange(of: model.schema) { _ in
+            if model.isTableCapture { focusPrimary() }
         }
         .environment(\.colorScheme, .dark)
     }
 
+    private func focusPrimary() {
+        if model.isTableCapture {
+            if let key = model.schema?.titleKey { focus = .column(key) }
+        } else {
+            focus = .editor
+        }
+    }
+
     private var header: some View {
         HStack {
-            Image(systemName: "square.and.pencil")
+            Image(systemName: model.isTableCapture ? "tablecells" : "square.and.pencil")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(Palette.textSecondary)
-            Text("Quick Capture")
+            Text(model.isTableCapture ? "Quick Capture — table row" : "Quick Capture")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(Palette.textSecondary)
             Spacer()
@@ -93,6 +109,75 @@ struct CaptureView: View {
         }
     }
 
+    private var tableForm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if model.isLoadingSchema {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                    Text("Loading columns…")
+                        .font(.system(size: 12))
+                        .foregroundColor(Palette.textSecondary)
+                }
+                .frame(minHeight: 64)
+            } else if let schema = model.schema {
+                ForEach(schema.columns, id: \.key) { column in
+                    columnField(column)
+                }
+                if model.imageData != nil {
+                    Text("Images can't go into table rows — remove the image or pick a document.")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(red: 1.0, green: 0.75, blue: 0.4))
+                }
+            }
+        }
+    }
+
+    private func columnField(_ column: CraftColumn) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(column.display)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundColor(Palette.textSecondary)
+                .frame(width: 90, alignment: .trailing)
+                .lineLimit(1)
+
+            if !column.options.isEmpty {
+                Menu {
+                    Button("—") { model.fieldValues[column.key] = "" }
+                    ForEach(column.options, id: \.self) { option in
+                        Button(option) { model.fieldValues[column.key] = option }
+                    }
+                } label: {
+                    Text(model.fieldValues[column.key, default: ""].isEmpty
+                         ? "Choose…" : model.fieldValues[column.key, default: ""])
+                        .font(.system(size: 13))
+                        .foregroundColor(model.fieldValues[column.key, default: ""].isEmpty
+                                         ? Palette.textSecondary : Palette.textPrimary)
+                }
+                .menuStyle(.borderlessButton)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Palette.pill))
+            } else {
+                TextField(column.isTitle ? "Row title" : column.display,
+                          text: binding(for: column.key),
+                          axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...4)
+                    .font(.system(size: 13, weight: column.isTitle ? .medium : .regular))
+                    .foregroundColor(Palette.textPrimary)
+                    .focused($focus, equals: .column(column.key))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Palette.pill))
+            }
+        }
+    }
+
+    private func binding(for key: String) -> Binding<String> {
+        Binding(get: { model.fieldValues[key, default: ""] },
+                set: { model.fieldValues[key] = $0 })
+    }
+
     private func imageRow(_ preview: NSImage) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(nsImage: preview)
@@ -116,12 +201,12 @@ struct CaptureView: View {
     private var destination: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Image(systemName: "arrow.right.doc.on.clipboard")
+                Image(systemName: model.isTableCapture ? "tablecells" : "arrow.right.doc.on.clipboard")
                     .font(.system(size: 11))
                     .foregroundColor(Palette.textSecondary)
 
                 if model.isPickingDoc {
-                    TextField("Search documents…", text: $model.docQuery)
+                    TextField("Search documents and tables…", text: $model.docQuery)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13))
                         .foregroundColor(Palette.textPrimary)
@@ -132,12 +217,13 @@ struct CaptureView: View {
                         model.isPickingDoc = true
                     } label: {
                         HStack(spacing: 6) {
-                            Text(model.selectedDoc?.title ?? "Choose a document…")
-                                .font(.system(size: 13, weight: model.selectedDoc == nil ? .regular : .medium))
-                                .foregroundColor(model.selectedDoc == nil ? Palette.textSecondary : Palette.textPrimary)
+                            Text(model.selectedDestination?.title ?? "Choose a destination…")
+                                .font(.system(size: 13, weight: model.selectedDestination == nil ? .regular : .medium))
+                                .foregroundColor(model.selectedDestination == nil ? Palette.textSecondary : Palette.textPrimary)
                                 .lineLimit(1)
-                            if let folder = model.selectedDoc?.folder {
-                                Text("· \(folder)")
+                            if let dest = model.selectedDestination,
+                               let context = model.store.context(for: dest) {
+                                Text("· \(context)")
                                     .font(.system(size: 11))
                                     .foregroundColor(Palette.textSecondary)
                                     .lineLimit(1)
@@ -168,24 +254,29 @@ struct CaptureView: View {
         VStack(alignment: .leading, spacing: 2) {
             let results = model.searchResults
             if results.isEmpty {
-                Text(model.docQuery.isEmpty ? "No recent documents — type to search" : "No matches")
+                Text(model.docQuery.isEmpty ? "No recent destinations — type to search" : "No matches")
                     .font(.system(size: 12))
                     .foregroundColor(Palette.textSecondary)
                     .padding(.vertical, 6)
                     .padding(.horizontal, 10)
             }
-            ForEach(Array(results.enumerated()), id: \.element.id) { index, doc in
+            ForEach(Array(results.enumerated()), id: \.element.id) { index, dest in
                 Button {
-                    model.choose(doc)
+                    model.choose(dest)
                 } label: {
-                    HStack {
-                        Text(doc.title)
+                    HStack(spacing: 6) {
+                        if dest.isCollection {
+                            Image(systemName: "tablecells")
+                                .font(.system(size: 10))
+                                .foregroundColor(Palette.textSecondary)
+                        }
+                        Text(dest.title)
                             .font(.system(size: 12.5))
                             .foregroundColor(Palette.textPrimary)
                             .lineLimit(1)
                         Spacer()
-                        if let folder = doc.folder {
-                            Text(folder)
+                        if let context = model.store.context(for: dest) {
+                            Text(context)
                                 .font(.system(size: 10.5))
                                 .foregroundColor(Palette.textSecondary)
                                 .lineLimit(1)

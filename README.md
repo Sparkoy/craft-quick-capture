@@ -31,7 +31,10 @@ Craft's API.
 - **⌥⌘Space** — toggle the capture popup (also available from the menu bar icon)
 - Type text, and/or **drag an image** onto the window (or **⌘V** paste an image)
 - Click the document row to pick a destination: recent docs show first, typing
-  searches every document title and folder name in your space
+  searches every document title, folder name, and table in your space
+- **Tables**: pick a Craft collection (marked with a table icon) and the popup
+  becomes a schema-driven form — one field per column, dropdowns for
+  single-select columns. ⌘↩ adds the row. (Images can't go into table rows.)
 - **↑/↓ + ↩** to pick a document, **⌘↩** to save, **esc** to cancel
 - The last-used document stays selected for rapid repeat captures
 - Markdown works: `# ` headings, `**bold**`, `*italics*`, `- ` lists,

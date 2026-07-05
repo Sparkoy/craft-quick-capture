@@ -7,12 +7,17 @@ final class CaptureModel: ObservableObject {
     @Published var imageData: Data?
     @Published var imagePreview: NSImage?
     @Published var docQuery = ""
-    @Published var selectedDoc: CraftDocument?
+    @Published var selectedDestination: Destination?
     @Published var isPickingDoc = false
     @Published var highlightedIndex = 0
     @Published var isSaving = false
     @Published var errorMessage: String?
     @Published var justSaved = false
+
+    // Table capture: schema of the selected collection and per-column values.
+    @Published var schema: CraftSchema?
+    @Published var fieldValues: [String: String] = [:]
+    @Published var isLoadingSchema = false
 
     let store: DocumentStore
     var onClose: (() -> Void)?
@@ -23,17 +28,26 @@ final class CaptureModel: ObservableObject {
         self.store = store
     }
 
-    var searchResults: [CraftDocument] { store.search(docQuery) }
+    var searchResults: [Destination] { store.search(docQuery) }
+
+    var isTableCapture: Bool { selectedDestination?.isCollection == true }
 
     var canSave: Bool {
-        selectedDoc != nil && !isSaving &&
-        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || imageData != nil)
+        guard selectedDestination != nil, !isSaving else { return false }
+        if isTableCapture {
+            guard let schema else { return false }
+            return imageData == nil &&
+                schema.columns.contains { !(fieldValues[$0.key] ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
+        }
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || imageData != nil
     }
 
     func prepareForShow() {
         errorMessage = nil
         justSaved = false
-        if selectedDoc == nil { selectedDoc = store.lastUsedDocument }
+        if selectedDestination == nil {
+            select(store.lastUsedDestination)
+        }
         store.refreshIfStale()
     }
 
@@ -59,11 +73,35 @@ final class CaptureModel: ObservableObject {
         return false
     }
 
-    func choose(_ doc: CraftDocument) {
-        selectedDoc = doc
+    func choose(_ dest: Destination) {
+        select(dest)
         docQuery = ""
         isPickingDoc = false
         highlightedIndex = 0
+    }
+
+    private func select(_ dest: Destination?) {
+        selectedDestination = dest
+        schema = nil
+        guard case .collection(let collection)? = dest else { return }
+        isLoadingSchema = true
+        Task {
+            defer { isLoadingSchema = false }
+            do {
+                let s = try await store.schema(for: collection)
+                // Still the selected destination? (user may have re-picked)
+                if case .collection(let current)? = selectedDestination, current.id == collection.id {
+                    schema = s
+                    fieldValues = fieldValues.filter { pair in s.columns.contains { $0.key == pair.key } }
+                    // Seed the title field from any text already typed.
+                    if fieldValues[s.titleKey, default: ""].isEmpty, !text.isEmpty {
+                        fieldValues[s.titleKey] = text
+                    }
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func moveHighlight(_ delta: Int) {
@@ -79,21 +117,25 @@ final class CaptureModel: ObservableObject {
     }
 
     func save() {
-        guard canSave, let doc = selectedDoc else { return }
+        guard canSave, let dest = selectedDestination else { return }
         isSaving = true
         errorMessage = nil
-        let body = text
-        let image = imageData
         Task {
             do {
-                var markdown = body.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let image {
-                    let name = "capture-\(Int(Date().timeIntervalSince1970)).png"
-                    let url = try await ImageUploader.upload(image, filename: name)
-                    markdown = markdown.isEmpty ? "![image](\(url))" : markdown + "\n\n![image](\(url))"
+                switch dest {
+                case .document(let doc):
+                    var markdown = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let image = imageData {
+                        let name = "capture-\(Int(Date().timeIntervalSince1970)).png"
+                        let url = try await ImageUploader.upload(image, filename: name)
+                        markdown = markdown.isEmpty ? "![image](\(url))" : markdown + "\n\n![image](\(url))"
+                    }
+                    try await client.appendBlocks(pageId: doc.id, markdown: markdown)
+                case .collection:
+                    guard let schema else { return }
+                    try await client.addCollectionItem(schema: schema, values: fieldValues)
                 }
-                try await client.appendBlocks(pageId: doc.id, markdown: markdown)
-                store.markUsed(doc)
+                store.markUsed(dest)
                 justSaved = true
                 isSaving = false
                 // Brief success flash, then close and reset.
@@ -115,5 +157,6 @@ final class CaptureModel: ObservableObject {
         highlightedIndex = 0
         errorMessage = nil
         justSaved = false
+        fieldValues = [:]
     }
 }
