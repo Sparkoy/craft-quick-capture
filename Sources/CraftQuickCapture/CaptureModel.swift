@@ -11,6 +11,8 @@ final class CaptureModel: ObservableObject {
     @Published var isPickingDoc = false
     @Published var highlightedIndex = 0
     @Published var isSaving = false
+    @Published var editorHeight: CGFloat = 64
+    @Published var focusEditorTick = 0
     @Published var errorMessage: String?
     @Published var justSaved = false
 
@@ -124,16 +126,37 @@ final class CaptureModel: ObservableObject {
             do {
                 switch dest {
                 case .document, .dailyNote:
-                    var markdown = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    func markdown(imageURL: String?) -> String {
+                        guard let imageURL else { return body }
+                        return body.isEmpty ? "![image](\(imageURL))"
+                                            : body + "\n\n![image](\(imageURL))"
+                    }
+                    func append(_ md: String) async throws {
+                        if case .document(let doc) = dest {
+                            try await client.appendBlocks(pageId: doc.id, markdown: md)
+                        } else if case .dailyNote(let day) = dest {
+                            try await client.appendBlocksToDailyNote(day: day, markdown: md)
+                        }
+                    }
                     if let image = imageData {
                         let name = "capture-\(Int(Date().timeIntervalSince1970)).png"
                         let url = try await ImageUploader.upload(image, filename: name)
-                        markdown = markdown.isEmpty ? "![image](\(url))" : markdown + "\n\n![image](\(url))"
-                    }
-                    if case .document(let doc) = dest {
-                        try await client.appendBlocks(pageId: doc.id, markdown: markdown)
-                    } else if case .dailyNote(let day) = dest {
-                        try await client.appendBlocksToDailyNote(day: day, markdown: markdown)
+                        do {
+                            try await append(markdown(imageURL: url))
+                        } catch CraftError.tool(let msg) where msg.contains("Document not found") {
+                            // Craft reports a failed image fetch as "Document not
+                            // found" — re-relay through the other host and retry.
+                            let retryUrl = try await ImageUploader.upload(image, filename: name,
+                                                                          preferLitterbox: true)
+                            do {
+                                try await append(markdown(imageURL: retryUrl))
+                            } catch CraftError.tool(let msg2) where msg2.contains("Document not found") {
+                                throw CraftError.tool("Craft couldn't ingest the image (tried both relay hosts). Text was not saved — try again.")
+                            }
+                        }
+                    } else {
+                        try await append(markdown(imageURL: nil))
                     }
                 case .collection:
                     guard let schema else { return }

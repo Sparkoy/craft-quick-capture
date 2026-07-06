@@ -8,6 +8,7 @@ final class CapturePanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+
 @MainActor
 final class CapturePanelController {
     private var panel: CapturePanel?
@@ -23,12 +24,26 @@ final class CapturePanelController {
     /// SwiftUI reports its rendered height (via GeometryReader); the window
     /// follows, top edge pinned so the panel grows downward.
     private func setContentHeight(_ height: CGFloat) {
+        // Layout changed — new text views may exist; keep drops falling through.
+        if let content = panel?.contentView { disableTextDrops(in: content) }
         guard let panel, height > 0,
               abs(height - panel.frame.height) > 0.5 else { return }
         var frame = panel.frame
         frame.origin.y = frame.maxY - height
         frame.size.height = height
         panel.setFrame(frame, display: true)
+    }
+
+    /// NSTextView registers itself for file drags (dropping a file inserts its
+    /// path as text), which steals drops from the SwiftUI .onDrop handler.
+    /// Unregister every text view so image drops reach the capture handler.
+    private func disableTextDrops(in view: NSView) {
+        if let textView = view as? NSTextView {
+            textView.unregisterDraggedTypes()
+        }
+        for sub in view.subviews {
+            disableTextDrops(in: sub)
+        }
     }
 
     var isVisible: Bool { panel?.isVisible ?? false }
@@ -44,6 +59,9 @@ final class CapturePanelController {
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         installKeyMonitor()
+        DispatchQueue.main.async { [weak self] in
+            if let content = self?.panel?.contentView { self?.disableTextDrops(in: content) }
+        }
     }
 
     func hide() {

@@ -75,7 +75,7 @@ struct CaptureView: View {
         if model.isTableCapture {
             if let key = model.schema?.titleKey { focus = .column(key) }
         } else {
-            focus = .editor
+            model.focusEditorTick += 1
         }
     }
 
@@ -106,14 +106,10 @@ struct CaptureView: View {
                     .padding(.top, 1)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $model.text)
-                .font(.system(size: 15))
-                .foregroundColor(Palette.textPrimary)
-                .scrollContentBackground(.hidden)
-                .frame(minHeight: 64, maxHeight: 180)
-                .fixedSize(horizontal: false, vertical: true)
-                .focused($focus, equals: .editor)
-                .padding(.leading, -5) // align TextEditor's inset with the placeholder
+            CaptureTextView(text: $model.text,
+                            focusTick: model.focusEditorTick,
+                            onHeightChange: { model.editorHeight = $0 })
+                .frame(height: min(max(model.editorHeight, 64), 180))
         }
     }
 

@@ -9,9 +9,15 @@ enum UploadError: LocalizedError {
 /// silently dropped). We relay through a short-lived host; Craft copies the image
 /// to its own CDN within seconds of the blocks-add call, then the temp copy expires.
 enum ImageUploader {
-    static func upload(_ data: Data, filename: String) async throws -> String {
-        if let url = try? await uploadTmpfiles(data, filename: filename) { return url }
-        if let url = try? await uploadLitterbox(data, filename: filename) { return url }
+    /// `preferLitterbox` flips the host order — used to retry when Craft's
+    /// server couldn't fetch the first host's URL.
+    static func upload(_ data: Data, filename: String, preferLitterbox: Bool = false) async throws -> String {
+        let attempts: [(Data, String) async throws -> String] = preferLitterbox
+            ? [uploadLitterbox, uploadTmpfiles]
+            : [uploadTmpfiles, uploadLitterbox]
+        for attempt in attempts {
+            if let url = try? await attempt(data, filename) { return url }
+        }
         throw UploadError.allHostsFailed
     }
 
