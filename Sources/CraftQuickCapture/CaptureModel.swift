@@ -123,14 +123,18 @@ final class CaptureModel: ObservableObject {
         Task {
             do {
                 switch dest {
-                case .document(let doc):
+                case .document, .dailyNote:
                     var markdown = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if let image = imageData {
                         let name = "capture-\(Int(Date().timeIntervalSince1970)).png"
                         let url = try await ImageUploader.upload(image, filename: name)
                         markdown = markdown.isEmpty ? "![image](\(url))" : markdown + "\n\n![image](\(url))"
                     }
-                    try await client.appendBlocks(pageId: doc.id, markdown: markdown)
+                    if case .document(let doc) = dest {
+                        try await client.appendBlocks(pageId: doc.id, markdown: markdown)
+                    } else if case .dailyNote(let day) = dest {
+                        try await client.appendBlocksToDailyNote(day: day, markdown: markdown)
+                    }
                 case .collection:
                     guard let schema else { return }
                     try await client.addCollectionItem(schema: schema, values: fieldValues)

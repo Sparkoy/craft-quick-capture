@@ -164,6 +164,13 @@ struct CraftClient {
                            command: "blocks add --id \(pageId) --markdown \(quoted) --position end")
     }
 
+    /// Appends to a daily note: `day` is today/tomorrow/yesterday or YYYY-MM-DD.
+    func appendBlocksToDailyNote(day: String, markdown: String) async throws {
+        let quoted = Self.craftQuote(markdown)
+        _ = try await call(tool: "craft_write",
+                           command: "blocks add --date \(day) --markdown \(quoted) --position end")
+    }
+
     /// Parses `collections list`: lines like
     ///   Name <id> - N items (in document <docId>)
     func listCollections() async throws -> [CraftCollection] {

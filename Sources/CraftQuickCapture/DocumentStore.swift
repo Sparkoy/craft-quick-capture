@@ -5,11 +5,13 @@ import Foundation
 enum Destination: Codable, Hashable, Identifiable {
     case document(CraftDocument)
     case collection(CraftCollection)
+    case dailyNote(String)   // "today" / "tomorrow" — resolved by Craft at save time
 
     var id: String {
         switch self {
         case .document(let d): return d.id
         case .collection(let c): return c.id
+        case .dailyNote(let day): return "daily:\(day)"
         }
     }
 
@@ -17,11 +19,17 @@ enum Destination: Codable, Hashable, Identifiable {
         switch self {
         case .document(let d): return d.title
         case .collection(let c): return c.name
+        case .dailyNote(let day): return day.prefix(1).uppercased() + day.dropFirst()
         }
     }
 
     var isCollection: Bool {
         if case .collection = self { return true }
+        return false
+    }
+
+    var isDailyNote: Bool {
+        if case .dailyNote = self { return true }
         return false
     }
 }
@@ -133,6 +141,7 @@ final class DocumentStore: ObservableObject {
         case .document(let d): return d.folder
         case .collection(let c):
             return documents.first { $0.id == c.documentId }?.title
+        case .dailyNote: return "Daily note"
         }
     }
 
@@ -148,6 +157,7 @@ final class DocumentStore: ObservableObject {
     }
 
     private func destination(forId id: String) -> Destination? {
+        if id.hasPrefix("daily:") { return .dailyNote(String(id.dropFirst(6))) }
         if let d = documents.first(where: { $0.id == id }) { return .document(d) }
         if let c = collections.first(where: { $0.id == id }) { return .collection(c) }
         return nil
@@ -168,7 +178,16 @@ final class DocumentStore: ObservableObject {
     /// Ranking: title prefix beats title word-start beats any match.
     func search(_ query: String, limit: Int = 6) -> [Destination] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return Array(recentDestinations.prefix(limit)) }
+        if q.isEmpty {
+            // "Today" always leads; then recents (which may include it — dedupe).
+            var results: [Destination] = [.dailyNote("today")]
+            results += recentDestinations.filter { $0.id != "daily:today" }
+            return Array(results.prefix(limit))
+        }
+        var pinned: [Destination] = []
+        if "today".hasPrefix(q) { pinned.append(.dailyNote("today")) }
+        if "tomorrow".hasPrefix(q) { pinned.append(.dailyNote("tomorrow")) }
+        if "yesterday".hasPrefix(q) { pinned.append(.dailyNote("yesterday")) }
         let tokens = q.split(separator: " ").map(String.init)
         var scored: [(dest: Destination, score: Int)] = []
 
@@ -183,7 +202,7 @@ final class DocumentStore: ObservableObject {
         for c in collections { consider(.collection(c)) }
         for d in documents { consider(.document(d)) }
 
-        return scored.sorted { ($0.score, $0.dest.title) < ($1.score, $1.dest.title) }
-            .prefix(limit).map(\.dest)
+        return pinned + scored.sorted { ($0.score, $0.dest.title) < ($1.score, $1.dest.title) }
+            .prefix(max(0, limit - pinned.count)).map(\.dest)
     }
 }

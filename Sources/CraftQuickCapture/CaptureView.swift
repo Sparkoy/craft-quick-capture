@@ -277,6 +277,10 @@ struct CaptureView: View {
                             Image(systemName: "tablecells")
                                 .font(.system(size: 10))
                                 .foregroundColor(Palette.textSecondary)
+                        } else if dest.isDailyNote {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 10))
+                                .foregroundColor(Palette.textSecondary)
                         }
                         Text(dest.title)
                             .font(.system(size: 12.5))
