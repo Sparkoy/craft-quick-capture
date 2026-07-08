@@ -1,0 +1,37 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Assemble .app
+        run: |
+          APP=CraftQuickCapture
+          mkdir -p "dist/${APP}.app/Contents/MacOS"
+          mkdir -p "dist/${APP}.app/Contents/Resources"
+          cp ".build/release/${APP}" "dist/${APP}.app/Contents/MacOS/${APP}"
+          cp "Resources/Info.plist" "dist/${APP}.app/Contents/Info.plist"
+          codesign --force --sign - "dist/${APP}.app"
+
+      - name: Zip
+        run: cd dist && zip -r ../CraftQuickCapture.zip CraftQuickCapture.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CraftQuickCapture
+          path: CraftQuickCapture.zip
+          retention-days: 30
