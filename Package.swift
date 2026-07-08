@@ -7,8 +7,6 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "CraftQuickCapture",
-            path: "Sources",
-            exclude: [],
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"])
             ],
